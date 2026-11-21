@@ -31,6 +31,10 @@
 #define USB_VENDOR_ID_VRS	0x0483
 #define USB_DEVICE_ID_VRS_DFP	0xa355
 
+/* VNM Simulation (uses the STMicroelectronics VID) */
+#define USB_VENDOR_ID_VNM		0x0483
+#define USB_DEVICE_ID_VNM_ELITE		0xa3d5
+
 /* FFBeast */
 #define USB_VENDOR_ID_FFBEAST		0x045b
 #define USB_DEVICE_ID_FFBEAST_JOYSTICK	0x58f9
