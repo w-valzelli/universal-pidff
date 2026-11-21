@@ -63,6 +63,16 @@
  */
 #define HID_PIDFF_QUIRK_MISSING_DEADBAND	BIT(7)
 
+/*
+ * Some devices answer GET_REPORT for the PID Block Load feature report
+ * with 0x00 in the report ID byte instead of the real report ID. The
+ * payload is otherwise valid, but hid-core looks the report up by that
+ * byte and drops the reply, so the block load status is never seen.
+ * Fetch the report raw and restore the report ID before parsing it.
+ * Fixes VNM wheelbases
+ */
+#define HID_PIDFF_QUIRK_FIX_BLOCK_LOAD_REPORT_ID	BIT(8)
+
 /* Kernel ifndef not included as we have our own copy of hid-pidff */
 int hid_pidff_init(struct hid_device *hid);
 int hid_pidff_init_with_quirks(struct hid_device *hid, u32 initial_quirks);

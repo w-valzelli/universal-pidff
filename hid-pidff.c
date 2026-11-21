@@ -782,6 +782,47 @@ static void pidff_fetch_pool(struct pidff_device *pidff)
 }
 
 /*
+ * Fetch the Block Load report from the device
+ *
+ * With HID_PIDFF_QUIRK_FIX_BLOCK_LOAD_REPORT_ID the report is read raw and
+ * its report ID byte restored before it is handed to hid-core for parsing
+ */
+static void pidff_fetch_block_load(struct pidff_device *pidff)
+{
+	struct hid_report *report = pidff->reports[PID_BLOCK_LOAD];
+	struct hid_device *hid = pidff->hid;
+	u32 len;
+	u8 *buf;
+	int ret;
+
+	if (!(pidff->quirks & HID_PIDFF_QUIRK_FIX_BLOCK_LOAD_REPORT_ID)) {
+		hid_hw_request(hid, report, HID_REQ_GET_REPORT);
+		hid_hw_wait(hid);
+		return;
+	}
+
+	len = hid_report_len(report);
+	buf = hid_alloc_report_buf(report, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	ret = hid_hw_raw_request(hid, report->id, buf, len, HID_FEATURE_REPORT,
+				 HID_REQ_GET_REPORT);
+	if (ret > 0) {
+		if (buf[0] != report->id)
+			hid_dbg(hid, "block load report id %u, fixing to %u\n",
+				buf[0], report->id);
+		buf[0] = report->id;
+		hid_report_raw_event(hid, HID_FEATURE_REPORT, buf, len,
+				     min_t(u32, ret, len), 0);
+	} else {
+		hid_dbg(hid, "raw block load request failed: %d\n", ret);
+	}
+
+	kfree(buf);
+}
+
+/*
  * Send a request for effect upload to the device
  *
  * Reset and enable actuators if no effects were present on the device
@@ -803,9 +844,7 @@ static int pidff_request_effect_upload(struct pidff_device *pidff, int efnum)
 
 	for (int i = 0; i < 60; i++) {
 		hid_dbg(pidff->hid, "pid_block_load requested\n");
-		hid_hw_request(pidff->hid, pidff->reports[PID_BLOCK_LOAD],
-			       HID_REQ_GET_REPORT);
-		hid_hw_wait(pidff->hid);
+		pidff_fetch_block_load(pidff);
 		if (pidff->block_load_status->value[0] ==
 		    pidff->status_id[PID_BLOCK_LOAD_SUCCESS]) {
 			hid_dbg(pidff->hid, "device reported free memory: %d bytes\n",
