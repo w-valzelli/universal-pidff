@@ -631,8 +631,8 @@ static void pidff_set_condition_report(struct pidff_device *pidff,
 
 		/* Omit Negative Saturation if missing */
 		if (!(pidff->quirks & HID_PIDFF_QUIRK_MISSING_NEG_SATURATION))
-			pidff_set_signed(&pidff->set_condition[PID_NEG_SATURATION],
-					effect->u.condition[i].left_saturation);
+			pidff_set(&pidff->set_condition[PID_NEG_SATURATION],
+				  effect->u.condition[i].left_saturation);
 
 		/* Omit Deadband field if missing */
 		if (!(pidff->quirks & HID_PIDFF_QUIRK_MISSING_DEADBAND))
