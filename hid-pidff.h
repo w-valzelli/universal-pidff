@@ -73,6 +73,16 @@
  */
 #define HID_PIDFF_QUIRK_FIX_BLOCK_LOAD_REPORT_ID	BIT(8)
 
+/*
+ * Some single-axis devices ignore the polar Direction in Set Effect and
+ * take the force direction only from the sign of the magnitude. Project
+ * the effect direction onto the X axis (level * sin(direction), as
+ * ff-memless does), fold it into the magnitude of constant, ramp and
+ * periodic effects, and always send a fixed direction.
+ * Fixes VNM wheelbases
+ */
+#define HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE	BIT(9)
+
 /* Kernel ifndef not included as we have our own copy of hid-pidff */
 int hid_pidff_init(struct hid_device *hid);
 int hid_pidff_init_with_quirks(struct hid_device *hid, u32 initial_quirks);

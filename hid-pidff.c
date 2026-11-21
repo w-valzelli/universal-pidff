@@ -9,6 +9,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include "hid-pidff.h"
+#include <linux/fixp-arith.h>
 #include <linux/hid.h>
 #include <linux/input.h>
 #include <linux/math64.h>
@@ -402,6 +403,20 @@ static void pidff_set_duration(struct pidff_usage *usage, u16 duration)
 	pidff_set_time(usage, duration);
 }
 
+/*
+ * HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE: X component of the effect
+ * direction, sin(direction) in Q15 (0x4000 -> +1, 0xC000 -> -1)
+ */
+static int pidff_direction_sin(struct ff_effect *effect)
+{
+	return fixp_sin16(effect->direction * 360 / 0x10000);
+}
+
+static s16 pidff_scale_by_direction(s16 value, int dir_sin)
+{
+	return clamp_t(int, value * dir_sin / S16_MAX, S16_MIN, S16_MAX);
+}
+
 static void pidff_set_effect_direction(struct pidff_device *pidff,
 				       struct ff_effect *effect)
 {
@@ -411,6 +426,11 @@ static void pidff_set_effect_direction(struct pidff_device *pidff,
 	/* Use fixed direction if needed */
 	if (pidff->quirks & HID_PIDFF_QUIRK_FIX_CONDITIONAL_DIRECTION &&
 	    pidff_is_effect_conditional(effect))
+		direction = PIDFF_FIXED_WHEEL_DIRECTION;
+
+	/* Direction is carried by the magnitude sign instead */
+	if (pidff->quirks & HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE &&
+	    !pidff_is_effect_conditional(effect))
 		direction = PIDFF_FIXED_WHEEL_DIRECTION;
 
 	pidff->set_effect[PID_DIRECTION_ENABLE].value[0] = direction_enable;
@@ -496,10 +516,15 @@ static int pidff_needs_set_envelope(struct ff_envelope *envelope,
 static void pidff_set_constant_report(struct pidff_device *pidff,
 				      struct ff_effect *effect)
 {
+	s16 level = effect->u.constant.level;
+
+	if (pidff->quirks & HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE)
+		level = pidff_scale_by_direction(level,
+						 pidff_direction_sin(effect));
+
 	pidff->set_constant[PID_EFFECT_BLOCK_INDEX].value[0] =
 		pidff->block_load[PID_EFFECT_BLOCK_INDEX].value[0];
-	pidff_set_signed(&pidff->set_constant[PID_MAGNITUDE],
-			 effect->u.constant.level);
+	pidff_set_signed(&pidff->set_constant[PID_MAGNITUDE], level);
 
 	hid_hw_request(pidff->hid, pidff->reports[PID_SET_CONSTANT],
 		       HID_REQ_SET_REPORT);
@@ -574,13 +599,31 @@ static int pidff_needs_set_effect(struct ff_effect *effect,
 static void pidff_set_periodic_report(struct pidff_device *pidff,
 				      struct ff_effect *effect)
 {
+	s16 magnitude = effect->u.periodic.magnitude;
+	s16 offset = effect->u.periodic.offset;
+	u16 phase = effect->u.periodic.phase;
+
+	if (pidff->quirks & HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE) {
+		int dir_sin = pidff_direction_sin(effect);
+
+		magnitude = pidff_scale_by_direction(magnitude, dir_sin);
+		offset = pidff_scale_by_direction(offset, dir_sin);
+
+		/*
+		 * An unsigned magnitude field cannot carry the sign (only the
+		 * absolute value is sent), invert the waveform with a half
+		 * period phase shift instead
+		 */
+		if (magnitude < 0 &&
+		    pidff->set_periodic[PID_MAGNITUDE].field->logical_minimum >= 0)
+			phase += 0x8000;
+	}
+
 	pidff->set_periodic[PID_EFFECT_BLOCK_INDEX].value[0] =
 		pidff->block_load[PID_EFFECT_BLOCK_INDEX].value[0];
-	pidff_set_signed(&pidff->set_periodic[PID_MAGNITUDE],
-			 effect->u.periodic.magnitude);
-	pidff_set_signed(&pidff->set_periodic[PID_OFFSET],
-			 effect->u.periodic.offset);
-	pidff_set(&pidff->set_periodic[PID_PHASE], effect->u.periodic.phase);
+	pidff_set_signed(&pidff->set_periodic[PID_MAGNITUDE], magnitude);
+	pidff_set_signed(&pidff->set_periodic[PID_OFFSET], offset);
+	pidff_set(&pidff->set_periodic[PID_PHASE], phase);
 	pidff_set_time(&pidff->set_periodic[PID_PERIOD],
 		       effect->u.periodic.period);
 
@@ -673,12 +716,20 @@ static int pidff_needs_set_condition(struct ff_effect *effect,
 static void pidff_set_ramp_report(struct pidff_device *pidff,
 				  struct ff_effect *effect)
 {
+	s16 start = effect->u.ramp.start_level;
+	s16 end = effect->u.ramp.end_level;
+
+	if (pidff->quirks & HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE) {
+		int dir_sin = pidff_direction_sin(effect);
+
+		start = pidff_scale_by_direction(start, dir_sin);
+		end = pidff_scale_by_direction(end, dir_sin);
+	}
+
 	pidff->set_ramp[PID_EFFECT_BLOCK_INDEX].value[0] =
 		pidff->block_load[PID_EFFECT_BLOCK_INDEX].value[0];
-	pidff_set_signed(&pidff->set_ramp[PID_RAMP_START],
-			 effect->u.ramp.start_level);
-	pidff_set_signed(&pidff->set_ramp[PID_RAMP_END],
-			 effect->u.ramp.end_level);
+	pidff_set_signed(&pidff->set_ramp[PID_RAMP_START], start);
+	pidff_set_signed(&pidff->set_ramp[PID_RAMP_END], end);
 	hid_hw_request(pidff->hid, pidff->reports[PID_SET_RAMP],
 		       HID_REQ_SET_REPORT);
 }
@@ -998,20 +1049,30 @@ static int pidff_upload_effect(struct input_dev *dev, struct ff_effect *new,
 	pidff->block_load[PID_EFFECT_BLOCK_INDEX].value[0] =
 		pidff->effect[new->id].pid_id;
 
+	/*
+	 * With the direction folded into the magnitude, a direction change
+	 * alone must also resend the type specific report
+	 */
+	struct ff_effect *cmp = old;
+
+	if (pidff->quirks & HID_PIDFF_QUIRK_DIRECTION_IN_MAGNITUDE && old &&
+	    new->direction != old->direction)
+		cmp = NULL;
+
 	PIDFF_SET_REPORT_IF_NEEDED(effect, new, old);
 	switch (new->type) {
 	case FF_CONSTANT:
-		PIDFF_SET_REPORT_IF_NEEDED(constant, new, old);
+		PIDFF_SET_REPORT_IF_NEEDED(constant, new, cmp);
 		PIDFF_SET_ENVELOPE_IF_NEEDED(constant, new, old);
 		break;
 
 	case FF_PERIODIC:
-		PIDFF_SET_REPORT_IF_NEEDED(periodic, new, old);
+		PIDFF_SET_REPORT_IF_NEEDED(periodic, new, cmp);
 		PIDFF_SET_ENVELOPE_IF_NEEDED(periodic, new, old);
 		break;
 
 	case FF_RAMP:
-		PIDFF_SET_REPORT_IF_NEEDED(ramp, new, old);
+		PIDFF_SET_REPORT_IF_NEEDED(ramp, new, cmp);
 		PIDFF_SET_ENVELOPE_IF_NEEDED(ramp, new, old);
 		break;
 
